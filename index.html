@@ -1440,7 +1440,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 <script id="site-data" type="application/json">{"site": {"title": "What Is Told, Untold, Untellable", "subtitle": "", "epigraph": "", "catchcopy": "", "subcopy": ""}, "works": []}</script>
 <script type="module">
 /* =========================================================
-   Firebase 版 LUNA3
+   Firebase 版
    - コンテンツは Firestore に保存（全端末で共有・永続化）
    - 管理者ログインは Firebase Authentication（メール＋パスワード）
    - 初回アクセス時、Firestore が空ならページ内蔵の初期データを
@@ -1478,7 +1478,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
   const DEFAULTS = JSON.parse(document.getElementById("site-data").textContent);
 
   /* ===== 特徴レーダーチャート：デフォルトデータ =====
-     LUNA3の「特徴レーダー」と同じ考え方。©2026を押すと表示される。
+     「特徴レーダー」と同じ考え方。©2026を押すと表示される。
      管理パネルから軸（3つ以上）・対象作品・数値(0-100)を編集できる。 */
   const DEFAULT_RADAR = {
     title: "特徴レーダー",
@@ -2913,8 +2913,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     html += '<div class="works">';
     /* ローマ数字 I の作品の上：診断・レーダー入口 */
     html += '<div class="work-card is-welcome" data-route="#/radar">';
-    html += '<div class="work-number">LUNA3</div>';
-    html += '<h2 class="work-title">ようこそ、LUNA3へ</h2>';
+    html += '<h2 class="work-title">ようこそ</h2>';
     html += '<p class="work-subtitle">Welcome</p>';
     html += '<p class="work-desc">いくつかの問いに答えると、あなたの読書傾向とおすすめ作品がわかります。あわせて、作品の特徴レーダーもご覧いただけます。</p>';
     html += '<div class="work-card-footer">';
@@ -4369,7 +4368,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 
   var RADAR_PALETTE = ["#c8a86a", "#8b5cf6", "#f59e0b", "#38bdf8", "#f87171", "#4ade80", "#f472b6"];
 
-  /* ===== 台詞・地の文抽出（LUNA3準拠・作品単体） ===== */
+  /* ===== 台詞・地の文抽出（作品単体） ===== */
   // 台詞: 「」内。地の文: 会話を含まないひとまとまりの段落で150文字以上（上限なし）。
   // 会話間の短い地の文や、会話をまたぐ結合は候補にしない。
   var TENSEN_DIALOGUE_MIN = 25;
@@ -4696,8 +4695,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       var html = "";
       html += '<div class="page-special page-radar">';
       html += "<header>";
-      html += '<p class="page-kicker">LUNA3</p>';
-      html += '<h1 class="page-title">ようこそ、LUNA3へ</h1>';
+      html += '<h1 class="page-title">ようこそ</h1>';
       html += '<div class="header-rule"></div>';
       html += "</header>";
       html += '<nav class="work-nav"><a href="#/" data-home>' + t("home") + "</a></nav>";
