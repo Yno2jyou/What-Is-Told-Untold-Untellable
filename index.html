@@ -2281,7 +2281,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
      （保存はされません。管理者が一度ログインすれば自動的に
      Firestoreへ書き込まれ、以後は全員に永続的に反映されます）。
   ===== */
-  async function ensureSeededIfAdmin() {
+  async function ensureSeededIfAdmin(force) {
     if (!isAdmin()) return;
     var metaSnap = await getDoc(META_REF);
     if (!metaSnap.exists()) {
@@ -2322,8 +2322,8 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       });
       var addBatch = writeBatch(db), added = 0;
       DEFAULTS.works.forEach(function (w) {
-        if (seeded.indexOf(w.id) >= 0) return;
-        seeded.push(w.id);
+        if (seeded.indexOf(w.id) >= 0 && !force) return;
+        if (seeded.indexOf(w.id) < 0) seeded.push(w.id);
         if (existing[w.id]) return;
         var ord = (w.id === "preface") ? (minOrder - 1) : (maxOrder + 1 + added);
         addBatch.set(doc(db, "site_works", w.id), {
@@ -2946,6 +2946,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       html += adminBar(
         '<button class="btn" data-action="edit-site">' + t("editSite") + '</button>' +
         '<button class="btn" data-action="edit-theme">' + t("editTheme") + '</button>' +
+        '<button class="btn" data-action="restore-defaults">序文・掉尾を追加</button>' +
         '<button class="btn primary" data-action="add-work">' + t("addWork") + '</button>' +
         '<button class="btn" data-action="logout">' + t("logout") + '</button>'
       );
@@ -3833,6 +3834,8 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
         .then(function () {
           setManageMode(true);
           overlay.remove();
+          /* ログイン直後に管理パネルを即表示（リロード不要） */
+          if (cache) render({ preserveScroll: true });
         })
         .catch(function (err) {
           errBox.textContent = "ログインできません（メールアドレスまたはパスワードが違います）。";
@@ -5564,6 +5567,17 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 
 
   function attachHomeAdminHandlers(data) {
+    var restoreBtn = app.querySelector('[data-action="restore-defaults"]');
+    if (restoreBtn) restoreBtn.addEventListener("click", async function () {
+      try {
+        await ensureSeededIfAdmin(true);
+        await loadData({ seed: false });
+        render({ preserveScroll: true });
+        alert("序文・掉尾を追加しました（すでにある場合はそのままです）");
+      } catch (e) {
+        alert("追加に失敗しました: " + (e && e.message ? e.message : e));
+      }
+    });
     var logoutBtn = app.querySelector('[data-action="logout"]');
     if (logoutBtn) logoutBtn.addEventListener("click", function () {
       if (window.confirm("ログアウトしますか？")) logout();
@@ -6648,8 +6662,9 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       try { sessionStorage.setItem("luna3-manage-mode", "0"); } catch (e) {}
     }
     updateFab();
+    if (cache) render();
     if (user && !_seedDone) {
-      /* ログイン直後：初期データ（序文・掉尾など）を一度だけ追加して再読み込み */
+      /* ログイン直後：初期データ（序文・掉尾など）を一度だけ追加して再読み込み（画面は先に描画済み） */
       withTimeout(ensureSeededIfAdmin(), 15000, "seed").then(function () {
         _seedDone = true;
         return loadData({ seed: false });
@@ -6657,11 +6672,10 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
         if (cache) render({ preserveScroll: true });
       }).catch(function (e) {
         console.warn("seed after login failed:", e);
-        if (cache) render({ preserveScroll: true });
+        try { alert("序文・掉尾の自動追加に失敗しました: " + (e && e.message ? e.message : e)); } catch (e2) {}
+        alert("序文・掉尾の自動追加に失敗しました: " + (e && e.message ? e.message : e));
       });
-      return;
     }
-    if (cache) render();
   });
 
   /* ===== 初期化 ===== */
