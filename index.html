@@ -705,10 +705,11 @@ header .site-catchcopy.is-egg-pulse {
 .wmap-empty { padding: 40px 16px; text-align: center; color: var(--fg); opacity: .6; font-size: 13px; line-height: 2; border: 1px dashed var(--line); border-radius: 3px; }
 .wmap-section-desc { font-size: 12px; opacity: .75; line-height: 1.8; margin-bottom: 16px; }
 .wmap-radar-wrap { display: flex; flex-direction: column; gap: 18px; align-items: center; }
-.wmap-radar-svg { width: 100%; max-width: 460px; height: auto; overflow: visible; }
+.wmap-radar-svg { width: 100%; max-width: 620px; height: auto; overflow: visible; }
 .wmap-radar-ring { fill: none; stroke: var(--line); stroke-width: 1; }
 .wmap-radar-spoke { stroke: var(--line); stroke-width: 1; }
-.wmap-radar-axis-label { font-family: var(--font-body); font-size: 11px; letter-spacing: .04em; fill: var(--fg); opacity: .8; }
+.wmap-radar-axis-label { font-family: var(--font-body); font-size: 11px; letter-spacing: .04em; fill: var(--fg); opacity: .85; }
+.wmap-radar-axis-label { font-size: 14px; }
 .wmap-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: center; }
 .wmap-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg); opacity: .65; cursor: pointer; background: none; border: none; font-family: var(--font-body); padding: 3px 0; transition: opacity .2s; }
 .wmap-legend-item:hover, .wmap-legend-item.active { opacity: 1; }
@@ -4343,7 +4344,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 
   /* ===== 特徴レーダーチャート：表示用SVG生成 ===== */
   function buildRadarSVG(axes, works, values, activeId, PALETTE) {
-    var W = 520, H = 520, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 70;
+    var W = 520, H = 520, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 48;
     function angleFor(i) { return -Math.PI / 2 + i * (2 * Math.PI / axes.length); }
     function ptFor(i, val) {
       var r = (Math.max(0, Math.min(100, val || 0)) / 100) * R;
@@ -4360,7 +4361,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     });
     axes.forEach(function (ax, i) {
       var a = angleFor(i);
-      var lx = cx + (R + 22) * Math.cos(a), ly = cy + (R + 22) * Math.sin(a);
+      var lx = cx + (R + 20) * Math.cos(a), ly = cy + (R + 20) * Math.sin(a);
       svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + (cx + R * Math.cos(a)) + '" y2="' + (cy + R * Math.sin(a)) + '" class="wmap-radar-spoke"></line>';
       svg += '<text x="' + lx + '" y="' + ly + '" class="wmap-radar-axis-label" text-anchor="middle">' + esc(ax.label || "") + '</text>';
     });
@@ -4529,7 +4530,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     axes.forEach(function (ax) {
       var v = raw[ax.id] || 0;
       // 0〜100 に正規化（相対強度）
-      out[ax.id] = Math.round(Math.max(0, Math.min(100, 30 + (v / maxAbs) * 70))); /* 極端な形を避け、下限30で緩やかに */
+      out[ax.id] = Math.round(Math.max(0, Math.min(100, 45 + (v / maxAbs) * 55))); /* 極端な形を避け、下限45で緩やかに */
     });
     return out;
   }
