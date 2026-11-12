@@ -2291,7 +2291,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       if (!("radar" in md)) patch.radar = DEFAULT_RADAR;
       if (!("quiz" in md)) patch.quiz = DEFAULT_QUIZ;
       if (!("overview" in md)) patch.overview = DEFAULT_OVERVIEW;
-      if (Object.keys(patch).length) await updateDoc(META_REF, patch);
+      if (Object.keys(patch).length) await updateMeta(patch);
     }
     var worksSnap = await getDocs(WORKS_COL);
     if (worksSnap.empty) {
@@ -2419,32 +2419,41 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     }
   }
 
+  /* site_meta/main が未作成でも保存できるようにする */
+  async function updateMeta(data) {
+    try { await updateDoc(META_REF, data); }
+    catch (e) {
+      if (e && (e.code === "not-found" || /No document to update|not-found/i.test(String(e.message || e)))) { await setDoc(META_REF, data, { merge: true }); }
+      else throw e;
+    }
+  }
+
   async function saveSite(partial) {
     var next = Object.assign({}, cache.site, partial);
-    await updateDoc(META_REF, { site: next });
+    await updateMeta({ site: next });
     if (cache) cache.site = next;
     invalidateEnglishSnapshot();
   }
   async function saveTheme(partial) {
     var next = Object.assign({}, cache.theme, partial);
-    await updateDoc(META_REF, { theme: next });
+    await updateMeta({ theme: next });
     if (cache) cache.theme = next;
   }
   async function saveRadar(partial) {
     var next = Object.assign({}, cache.radar, partial);
-    await updateDoc(META_REF, { radar: next });
+    await updateMeta({ radar: next });
     if (cache) cache.radar = next;
   }
   async function saveQuiz(partial) {
     var next = Object.assign({}, DEFAULT_QUIZ, cache && cache.quiz, partial);
-    await updateDoc(META_REF, { quiz: next });
+    await updateMeta({ quiz: next });
     if (cache) cache.quiz = next;
   }
   async function saveOverview(partial) {
     var next = Object.assign({}, DEFAULT_OVERVIEW, cache && cache.overview, partial);
     if (partial && partial.timeline) next.timeline = partial.timeline;
     if (partial && partial.pie) next.pie = partial.pie;
-    await updateDoc(META_REF, { overview: next });
+    await updateMeta({ overview: next });
     if (cache) cache.overview = next;
   }
   async function saveWork(id, partial) {
