@@ -6648,6 +6648,19 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       try { sessionStorage.setItem("luna3-manage-mode", "0"); } catch (e) {}
     }
     updateFab();
+    if (user && !_seedDone) {
+      /* ログイン直後：初期データ（序文・掉尾など）を一度だけ追加して再読み込み */
+      withTimeout(ensureSeededIfAdmin(), 15000, "seed").then(function () {
+        _seedDone = true;
+        return loadData({ seed: false });
+      }).then(function () {
+        if (cache) render({ preserveScroll: true });
+      }).catch(function (e) {
+        console.warn("seed after login failed:", e);
+        if (cache) render({ preserveScroll: true });
+      });
+      return;
+    }
     if (cache) render();
   });
 
