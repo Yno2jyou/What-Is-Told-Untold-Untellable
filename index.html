@@ -2308,6 +2308,35 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
         });
       });
       await batch.commit();
+    } else {
+      /* 既存の作品があっても、序文・掉尾を一度だけ追加する（削除しても復活しない） */
+      var metaNow = (await getDoc(META_REF)).data() || {};
+      var seeded = Array.isArray(metaNow.seededIds) ? metaNow.seededIds.slice() : [];
+      var existing = {};
+      var minOrder = 0, maxOrder = 0;
+      worksSnap.forEach(function (d) {
+        existing[d.id] = true;
+        var o = Number((d.data() || {}).order) || 0;
+        if (o < minOrder) minOrder = o;
+        if (o > maxOrder) maxOrder = o;
+      });
+      var addBatch = writeBatch(db), added = 0;
+      DEFAULTS.works.forEach(function (w) {
+        if (seeded.indexOf(w.id) >= 0) return;
+        seeded.push(w.id);
+        if (existing[w.id]) return;
+        var ord = (w.id === "preface") ? (minOrder - 1) : (maxOrder + 1 + added);
+        addBatch.set(doc(db, "site_works", w.id), {
+          number: w.number, title: w.title, subtitle: w.subtitle,
+          desc: w.desc, content: w.content,
+          order: ord,
+          published: w.published !== false,
+          secret: !!w.secret
+        });
+        added++;
+      });
+      if (added) await addBatch.commit();
+      if (seeded.length !== (metaNow.seededIds || []).length) await updateMeta({ seededIds: seeded });
     }
   }
 
@@ -2825,6 +2854,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     applyTheme(cache.theme);
     var route = currentRoute();
     if (route.name === "radar") {
+      location.hash = "#/"; renderHome(cache); return;
       renderRadarPage(cache);
     } else if (route.name === "tensen") {
       var tw = cache.works.filter(function (w) { return w.id === route.id; })[0];
@@ -2916,9 +2946,6 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       html += adminBar(
         '<button class="btn" data-action="edit-site">' + t("editSite") + '</button>' +
         '<button class="btn" data-action="edit-theme">' + t("editTheme") + '</button>' +
-        '<button class="btn" data-action="edit-radar">特徴レーダーを編集</button>' +
-        '<button class="btn" data-action="edit-quiz">診断を編集</button>' +
-        '<button class="btn" data-action="edit-overview">時間軸・傾向を編集</button>' +
         '<button class="btn primary" data-action="add-work">' + t("addWork") + '</button>' +
         '<button class="btn" data-action="logout">' + t("logout") + '</button>'
       );
@@ -2963,15 +2990,6 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       html += '</div>';
       html += '</div>';
     });
-    /* 作品一覧の後：診断・レーダー入口 */
-    html += '<div class="work-card is-welcome" data-route="#/radar">';
-    html += '<h2 class="work-title">診断・特徴レーダー</h2>';
-    html += '<p class="work-subtitle">Radar</p>';
-    html += '<p class="work-desc">いくつかの問いに答えると、あなたの読書傾向とおすすめ作品がわかります。あわせて、作品の特徴レーダーもご覧いただけます。</p>';
-    html += '<div class="work-card-footer">';
-    html += '<span class="work-link">はじめる →</span>';
-    html += '</div>';
-    html += '</div>';
     html += '</div></main>';
     html += '<footer><p>' + esc(data.site.title) + '</p><p>&copy; 2026</p></footer>';
     app.innerHTML = html;
