@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
 <title>What Is Told, Untold, Untellable</title>
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js">
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js">
 <link rel="icon" href="icon-satellite.ico?v=2" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="icon-satellite-32.png?v=2">
 <link rel="icon" type="image/png" sizes="16x16" href="icon-satellite-16.png?v=2">
@@ -1421,6 +1425,39 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 <body>
 
 <div id="app"></div>
+<script>
+/* 前回表示したトップ画面を、Firebase読み込みを待たずに即表示（stale-while-revalidate）。
+   本体スクリプトが起動すると自動的に最新の描画で置き換わる。 */
+(function () {
+  try {
+    var h = location.hash;
+    if (h && h !== "#/" && h !== "#") return;
+    var lang = localStorage.getItem("luna3-ui-lang") || sessionStorage.getItem("luna3-ui-lang") || "ja";
+    if (lang === "en") return;
+    if (sessionStorage.getItem("luna3-manage-mode") === "1") return;
+    if (sessionStorage.getItem("luna3-secret-unlocked") === "1") return;
+    var raw = localStorage.getItem("luna3-home-snap-v1");
+    if (!raw) return;
+    var o = JSON.parse(raw);
+    if (!o || !o.html) return;
+    if (o.theme) {
+      var st = document.documentElement.style;
+      if (o.theme.bg) st.setProperty("--bg", o.theme.bg);
+      if (o.theme.fg) st.setProperty("--fg", o.theme.fg);
+      if (o.theme.accent) st.setProperty("--accent", o.theme.accent);
+    }
+    var app = document.getElementById("app");
+    app.innerHTML = o.html;
+    app.setAttribute("data-snap", "1");
+    /* 本体が起動するまでの間だけ、カードのタップを受け付ける */
+    app.addEventListener("click", function (e) {
+      if (window.__luna3Ready) return;
+      var c = e.target && e.target.closest && e.target.closest(".work-card[data-route]");
+      if (c) location.hash = c.getAttribute("data-route");
+    });
+  } catch (e) {}
+})();
+</script>
 
 <button id="site-menu-btn" class="site-menu-btn" type="button" title="メニュー" aria-label="メニューを開く">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1449,11 +1486,9 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
    ========================================================= */
 
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  /* firebase-auth は閲覧だけの訪問者には不要なので、初回描画後に遅延読み込みする */
   import {
-    getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut
-  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
-  import {
-    getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc,
+    initializeFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc,
     collection, getDocs, writeBatch
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
@@ -1470,8 +1505,18 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
   /* ===================================================================== */
 
   const fbApp = initializeApp(firebaseConfig);
-  const auth = getAuth(fbApp);
-  const db = getFirestore(fbApp);
+  /* 回線によってWebChannelが詰まり「取得失敗→初期画面表示」になるのを避けるため、自動でロングポーリングへ切り替える */
+  const db = initializeFirestore(fbApp, { experimentalAutoDetectLongPolling: true });
+
+  const AUTH_URL = "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+  let _authP = null;
+  function loadAuth() {
+    if (!_authP) {
+      _authP = import(AUTH_URL).then(function (m) { return { m: m, a: m.getAuth(fbApp) }; });
+      _authP.catch(function () { _authP = null; });
+    }
+    return _authP;
+  }
 
   const META_REF = doc(db, "site_meta", "main");
   const WORKS_COL = collection(db, "site_works");
@@ -2366,6 +2411,10 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
   var _loadSeq = 0;
   var _navSeq = 0;
   var _seedDone = false;
+  var _latestLoad = null;
+  var _lastSyncAt = 0;        // 最後にサーバから取得できた時刻
+  var _cacheIsDefaults = false; // cache が内蔵初期データ由来か
+  var _cacheSig = "";         // cache の内容シグネチャ（変化検知用）
 
   function buildDefaultsCache() {
     return {
@@ -2380,10 +2429,78 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     };
   }
 
+  function sigOf(c) {
+    var s = JSON.stringify(c), h = 5381;
+    for (var i = 0; i < s.length; i++) h = (((h << 5) + h) + s.charCodeAt(i)) | 0;
+    return s.length + ":" + h;
+  }
+
+  /* ===== 永続キャッシュ（IndexedDB）：2回目以降の訪問で即表示するため ===== */
+  var IDB_NAME = "luna3-cache", IDB_STORE = "kv", IDB_KEY = "data-v1";
+  var _idbP = null;
+  function idbOpen() {
+    if (_idbP) return _idbP;
+    _idbP = new Promise(function (resolve, reject) {
+      try {
+        var req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = function () { req.result.createObjectStore(IDB_STORE); };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+        req.onblocked = function () { reject(new Error("idb blocked")); };
+      } catch (e) { reject(e); }
+    });
+    _idbP.catch(function () { _idbP = null; });
+    return _idbP;
+  }
+  function idbGet(key) {
+    return idbOpen().then(function (idb) {
+      return new Promise(function (resolve, reject) {
+        var r = idb.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(key);
+        r.onsuccess = function () { resolve(r.result); };
+        r.onerror = function () { reject(r.error); };
+      });
+    });
+  }
+  function idbSet(key, val) {
+    return idbOpen().then(function (idb) {
+      return new Promise(function (resolve, reject) {
+        var tx = idb.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).put(val, key);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+        tx.onabort = function () { reject(tx.error); };
+      });
+    });
+  }
+  function persistCache() {
+    if (!cache || _cacheIsDefaults) return;
+    var rec = { v: 1, savedAt: Date.now(), sig: _cacheSig, data: cache };
+    var run = function () { idbSet(IDB_KEY, rec).catch(function (e) { console.warn("cache save failed", e); }); };
+    if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 3000 });
+    else setTimeout(run, 300);
+  }
+  function validPersisted(rec) {
+    return !!(rec && rec.v === 1 && rec.data && Array.isArray(rec.data.works) && rec.data.works.length && rec.data.site);
+  }
+
+  /* 取得は最大3回まで再試行する（モバイル回線の一時的な失敗で初期画面に落ちないように） */
+  async function fetchRemote() {
+    var lastErr;
+    for (var i = 0; i < 3; i++) {
+      try {
+        return await withTimeout(Promise.all([getDoc(META_REF), getDocs(WORKS_COL)]), 10000, "load");
+      } catch (e) {
+        lastErr = e;
+        if (i < 2) await new Promise(function (r) { setTimeout(r, 700 * (i + 1)); });
+      }
+    }
+    throw lastErr;
+  }
+
   /**
    * Firestore から最新データを取得して cache を更新する。
-   * opts.seed === true のときだけ（初回など）シード処理を走らせる。
-   * 失敗時は既存の cache を維持し、作品数が突然 DEFAULTS に戻るのを防ぐ。
+   * 失敗時は「内蔵の初期データ」に差し替えない（＝作品が消えた初期画面が出るバグの原因だった）。
+   * 既存 cache があればそのまま維持し、無ければ null を返す。
    */
   async function loadData(opts) {
     opts = opts || {};
@@ -2391,62 +2508,66 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     invalidateEnglishSnapshot();
 
     var shouldSeed = opts.seed === true || (opts.seed !== false && isAdmin() && !_seedDone && !cache);
-    if (shouldSeed) {
+    var p = (async function () {
+      if (shouldSeed) {
+        try {
+          await withTimeout(ensureSeededIfAdmin(), 8000, "seed");
+          _seedDone = true;
+        } catch (e) {
+          console.warn("seed skipped:", e);
+        }
+      }
       try {
-        await withTimeout(ensureSeededIfAdmin(), 8000, "seed");
-        _seedDone = true;
-      } catch (e) {
-        console.warn("seed skipped:", e);
-      }
-    }
+        var pair = await fetchRemote();
+        // より新しい loadData が始まっていたら、そちらの結果を採用する（nullを返して空表示にしない）
+        if (seq !== _loadSeq) return _latestLoad || cache;
 
-    try {
-      // meta と works を並列取得してモバイルの待ち時間を短縮
-      var pair = await withTimeout(
-        Promise.all([getDoc(META_REF), getDocs(WORKS_COL)]),
-        12000,
-        "load"
-      );
-      // より新しい loadData が始まっていたら結果を捨てる
-      if (seq !== _loadSeq) return cache;
-
-      var metaSnap = pair[0];
-      var worksSnap = pair[1];
-      if (!metaSnap.exists() || worksSnap.empty) {
-        // Firestore が空のときだけ DEFAULTS。既に有効な cache があれば維持。
-        if (!cache) cache = buildDefaultsCache();
+        var metaSnap = pair[0];
+        var worksSnap = pair[1];
+        if (worksSnap.empty) {
+          // サーバが作品ゼロと応答した場合のみ初期データ。既に有効な cache があれば維持（保存もしない）
+          if (!cache) { cache = buildDefaultsCache(); _cacheIsDefaults = true; }
+          _lastSyncAt = Date.now();
+          return cache;
+        }
+        var meta = metaSnap.exists() ? (metaSnap.data() || {}) : {};
+        var works = [];
+        worksSnap.forEach(function (d) {
+          var row = Object.assign({ id: d.id }, d.data());
+          if (row.published === undefined) row.published = true;
+          if (row.secret === undefined) row.secret = false;
+          works.push(row);
+        });
+        works.sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+        var next = {
+          site: Object.assign({ title: "", subtitle: "", epigraph: "", catchcopy: "", subcopy: "" }, meta.site || DEFAULTS.site || {}),
+          theme: meta.theme || { bg: "#060508", fg: "#e6e2dc", accent: "#9a8b7a" },
+          radar: Object.assign({}, DEFAULT_RADAR, meta.radar || {}),
+          quiz: Object.assign({}, DEFAULT_QUIZ, meta.quiz || {}, {
+            axes: (meta.quiz && meta.quiz.axes) || DEFAULT_QUIZ.axes,
+            questions: (meta.quiz && meta.quiz.questions) || DEFAULT_QUIZ.questions
+          }),
+          overview: Object.assign({}, DEFAULT_OVERVIEW, meta.overview || {}, {
+            timeline: (meta.overview && meta.overview.timeline) || DEFAULT_OVERVIEW.timeline,
+            pie: (meta.overview && meta.overview.pie) || DEFAULT_OVERVIEW.pie
+          }),
+          works: works
+        };
+        var nextSig = sigOf(next);
+        var changed = nextSig !== _cacheSig;
+        cache = next;
+        _cacheSig = nextSig;
+        _cacheIsDefaults = false;
+        _lastSyncAt = Date.now();
+        if (changed) persistCache();
         return cache;
+      } catch (e) {
+        console.warn("読み込みに失敗:", e);
+        return cache; // 失敗しても DEFAULTS では上書きしない（null のままなら呼び出し側が再試行UIを出す）
       }
-      var meta = metaSnap.data();
-      var works = [];
-      worksSnap.forEach(function (d) {
-        var row = Object.assign({ id: d.id }, d.data());
-        if (row.published === undefined) row.published = true;
-        if (row.secret === undefined) row.secret = false;
-        works.push(row);
-      });
-      works.sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
-      cache = {
-        site: Object.assign({ title: "", subtitle: "", epigraph: "", catchcopy: "", subcopy: "" }, meta.site || {}),
-        theme: meta.theme || { bg: "#060508", fg: "#e6e2dc", accent: "#9a8b7a" },
-        radar: Object.assign({}, DEFAULT_RADAR, meta.radar || {}),
-        quiz: Object.assign({}, DEFAULT_QUIZ, meta.quiz || {}, {
-          axes: (meta.quiz && meta.quiz.axes) || DEFAULT_QUIZ.axes,
-          questions: (meta.quiz && meta.quiz.questions) || DEFAULT_QUIZ.questions
-        }),
-        overview: Object.assign({}, DEFAULT_OVERVIEW, meta.overview || {}, {
-          timeline: (meta.overview && meta.overview.timeline) || DEFAULT_OVERVIEW.timeline,
-          pie: (meta.overview && meta.overview.pie) || DEFAULT_OVERVIEW.pie
-        }),
-        works: works
-      };
-      return cache;
-    } catch (e) {
-      console.warn("読み込みに失敗:", e);
-      // 重要: 失敗時に DEFAULTS で上書きしない（作品数のチラつき・不整合の主因）
-      if (!cache) cache = buildDefaultsCache();
-      return cache;
-    }
+    })();
+    _latestLoad = p;
+    return p;
   }
 
   /* site_meta/main が未作成でも保存できるようにする */
@@ -2844,13 +2965,57 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     app.innerHTML = '<div style="max-width:var(--max-width);margin:120px auto;text-align:center;font-family:var(--font-mono);font-size:12px;color:var(--fg-dim);letter-spacing:0.18em;">' + (isEn() ? 'Loading ...' : '読み込み中 ...') + '</div>';
   }
 
+  var _retryCount = 0, _retryTimer = null;
+  function showLoadError() {
+    var en = isEn();
+    app.innerHTML = '<div style="max-width:var(--max-width);margin:120px auto;text-align:center;font-family:var(--font-mono);font-size:12px;color:var(--fg-dim);letter-spacing:0.12em;line-height:2;padding:0 20px;">' +
+      (en ? 'Could not load the content. Retrying automatically ...' : '読み込みに失敗しました。自動で再試行しています ...') +
+      '<br><button class="btn" id="load-retry-btn" type="button" style="margin-top:24px">' + (en ? 'Retry' : '再読み込み') + '</button></div>';
+    var b = document.getElementById("load-retry-btn");
+    if (b) b.addEventListener("click", function () { _retryCount = 0; render(); });
+    if (_retryTimer) clearTimeout(_retryTimer);
+    if (_retryCount < 6) {
+      _retryCount++;
+      _retryTimer = setTimeout(function () { if (!cache) render(); }, 3000 * _retryCount);
+    }
+  }
+
+  function isEditingNow() { return !!document.getElementById("inline-editor-toolbar"); }
+
+  /* 画面に出しているキャッシュはそのままに、裏で最新を確認。変化があったときだけ描画し直す */
+  var _revalidating = null;
+  function revalidate() {
+    if (_revalidating) return _revalidating;
+    var before = _cacheSig;
+    _revalidating = loadData({ seed: false }).then(function () {
+      if (cache && !_cacheIsDefaults && _cacheSig !== before && !isEditingNow()) {
+        return render({ preserveScroll: true });
+      }
+    }).catch(function (e) { console.warn("revalidate failed", e); })
+      .then(function () { _revalidating = null; });
+    return _revalidating;
+  }
+
+  /* トップ画面のHTMLを保存し、次回訪問時に Firebase 読み込みを待たず即表示する */
+  function saveHomeSnapshot() {
+    try {
+      if (isManaging() || isEn() || isSecretUnlocked() || _cacheIsDefaults) return;
+      var html = app.innerHTML;
+      var theme = cache && cache.theme;
+      var run = function () {
+        try { localStorage.setItem("luna3-home-snap-v1", JSON.stringify({ html: html, theme: theme, t: Date.now() })); } catch (e) {}
+      };
+      if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 3000 }); else setTimeout(run, 300);
+    } catch (e) {}
+  }
+
   async function render(opts) {
     opts = opts || {};
     if (!cache) {
       showLoading();
       await loadData({ seed: true });
     }
-    if (!cache) return;
+    if (!cache) { showLoadError(); return; }
     applyTheme(cache.theme);
     var route = currentRoute();
     if (route.name === "radar") {
@@ -2886,7 +3051,9 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       renderWork(cache, work);
     } else {
       renderHome(cache);
+      saveHomeSnapshot();
     }
+    app.removeAttribute("data-snap");
     startStars();
     if (!opts.preserveScroll) window.scrollTo(0, 0);
     if (isEn()) scheduleTranslateDom();
@@ -2904,19 +3071,10 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
    * 連続タップ時は _navSeq で古い結果を捨てる
    */
   async function navigateAndRefresh() {
-    var seq = ++_navSeq;
-    if (cache) {
-      await render();
-    } else {
-      showLoading();
-    }
-    try {
-      await loadData({ seed: false });
-    } catch (e) {
-      console.warn("navigation refresh failed", e);
-    }
-    if (seq !== _navSeq) return;
-    await render({ preserveScroll: false });
+    ++_navSeq;
+    await render();
+    // 毎回の全件再取得はやめ、最後の同期から60秒以上経っているときだけ裏で確認する
+    if (cache && Date.now() - _lastSyncAt > 60000) revalidate();
   }
 
   function adminBar(extraHtml) {
@@ -3830,7 +3988,8 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 
     function tryLogin() {
       errBox.style.display = "none";
-      signInWithEmailAndPassword(auth, emailInput.value.trim(), passInput.value)
+      loadAuth()
+        .then(function (x) { return x.m.signInWithEmailAndPassword(x.a, emailInput.value.trim(), passInput.value); })
         .then(function () {
           setManageMode(true);
           overlay.remove();
@@ -3851,7 +4010,7 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 
   function logout() {
     setManageMode(false);
-    signOut(auth);
+    loadAuth().then(function (x) { return x.m.signOut(x.a); }).catch(function (e) { console.warn("signOut failed", e); });
   }
 
   function closeSidebar() {
@@ -6654,15 +6813,20 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     if (a) { e.preventDefault(); location.hash = "#/"; }
   });
 
-  /* ===== 認証状態の監視 ===== */
-  onAuthStateChanged(auth, function (user) {
+  /* ===== 認証状態の監視（firebase-auth は初回描画後に遅延読み込み） ===== */
+  var _prevAdmin = false;
+  function onAuthChanged(user) {
     currentUser = user;
     if (!user) {
       manageMode = false;
       try { sessionStorage.setItem("luna3-manage-mode", "0"); } catch (e) {}
     }
     updateFab();
-    if (cache) render();
+    var adminNow = !!user;
+    var adminChanged = adminNow !== _prevAdmin;
+    _prevAdmin = adminNow;
+    // 管理者状態が変わったときだけ描画し直す（閲覧者の初回コールバックで無駄に再描画しない）
+    if (cache && adminChanged) render({ preserveScroll: true });
     if (user && !_seedDone) {
       /* ログイン直後：初期データ（序文・掉尾など）を一度だけ追加して再読み込み（画面は先に描画済み） */
       withTimeout(ensureSeededIfAdmin(), 15000, "seed").then(function () {
@@ -6673,17 +6837,61 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
       }).catch(function (e) {
         console.warn("seed after login failed:", e);
         try { alert("序文・掉尾の自動追加に失敗しました: " + (e && e.message ? e.message : e)); } catch (e2) {}
-        alert("序文・掉尾の自動追加に失敗しました: " + (e && e.message ? e.message : e));
       });
     }
-  });
+  }
 
-  /* ===== 初期化 ===== */
-  updateFab();
-  if (location.hash.indexOf("#/") !== 0) location.hash = "#/";
-  Promise.resolve(render()).then(function () {
+  var _authStarted = false;
+  function startAuthOnce() {
+    if (_authStarted) return;
+    _authStarted = true;
+    (function go() {
+      loadAuth()
+        .then(function (x) { x.m.onAuthStateChanged(x.a, onAuthChanged); })
+        .catch(function (e) { console.warn("auth load failed", e); setTimeout(go, 5000); });
+    })();
+  }
+
+  /* ===== 初期化 =====
+     1) ネットワーク取得を即開始しつつ、IndexedDB の前回データがあれば先に描画
+     2) 取得完了後、内容が変わっていたときだけ描画し直す
+     3) 取得に失敗しても内蔵の初期データには落とさず、再試行UIを出す */
+  async function boot() {
+    window.__luna3Ready = true;
+    updateFab();
+    if (location.hash.indexOf("#/") !== 0) {
+      try { history.replaceState(null, "", "#/"); } catch (e) { location.hash = "#/"; }
+    }
+    if (!app.firstChild) showLoading();
+
+    var netP = loadData({ seed: true });
+    var persisted = null;
+    try { persisted = await withTimeout(idbGet(IDB_KEY), 1500, "idb"); } catch (e) {}
+
+    var rendered = false, shownSig = null;
+    if ((!cache || _cacheIsDefaults) && validPersisted(persisted)) {
+      cache = persisted.data;
+      _cacheSig = persisted.sig || sigOf(cache);
+      _cacheIsDefaults = false;
+      shownSig = _cacheSig;
+      await render();
+      rendered = true;
+      startAuthOnce();
+    }
+
+    await netP;
+
+    if (!cache) {
+      showLoadError();
+    } else if (!rendered) {
+      await render();
+    } else if (_cacheSig !== shownSig && !_cacheIsDefaults && !isEditingNow()) {
+      await render({ preserveScroll: true });
+    }
+    startAuthOnce();
     if (isEn()) scheduleTranslateDom();
-  });
+  }
+  boot();
 
   // エピグラフ5回タップ → 言語切替（単一ハンドラのみ）
   (function setupLangGesture() {
