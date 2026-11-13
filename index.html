@@ -1426,6 +1426,64 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
 
 <div id="app"></div>
 <script>
+/* 初回高速化：Firebase SDK(数百KB)の読み込みを待たず、Firestore REST で作品データを先行取得する。
+   SDKが詰まった場合の保険として、一定時間起動しなければ1回だけ自動リロードする。 */
+window.__luna3Rest = (function () {
+  var BASE = "https://firestore.googleapis.com/v1/projects/project-yno2jyou/databases/(default)/documents";
+  var KEY = "AIzaSyAyBCAw4XkBRcbXezUz4mZ45m1c4DlqNxU";
+  function val(v) {
+    if (!v) return null;
+    if ("stringValue" in v) return v.stringValue;
+    if ("integerValue" in v) return Number(v.integerValue);
+    if ("doubleValue" in v) return v.doubleValue;
+    if ("booleanValue" in v) return v.booleanValue;
+    if ("nullValue" in v) return null;
+    if ("timestampValue" in v) return v.timestampValue;
+    if ("arrayValue" in v) return (v.arrayValue.values || []).map(val);
+    if ("mapValue" in v) return fields(v.mapValue);
+    if ("referenceValue" in v) return v.referenceValue;
+    return null;
+  }
+  function fields(o) { var r = {}, f = (o && o.fields) || {}; for (var k in f) r[k] = val(f[k]); return r; }
+  function get(url, ms) {
+    var c = new AbortController(), t = setTimeout(function () { c.abort(); }, ms);
+    return fetch(url, { signal: c.signal }).then(function (r) {
+      clearTimeout(t);
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error("rest " + r.status);
+      return r.json();
+    }, function (e) { clearTimeout(t); throw e; });
+  }
+  function works(token, acc, ms) {
+    var url = BASE + "/site_works?pageSize=300&key=" + KEY + (token ? "&pageToken=" + encodeURIComponent(token) : "");
+    return get(url, ms).then(function (j) {
+      ((j && j.documents) || []).forEach(function (d) { acc.push({ id: d.name.split("/").pop(), data: fields(d) }); });
+      return (j && j.nextPageToken) ? works(j.nextPageToken, acc, ms) : acc;
+    });
+  }
+  function load(ms) {
+    return Promise.all([get(BASE + "/site_meta/main?key=" + KEY, ms), works(null, [], ms)])
+      .then(function (p) { return { meta: p[0] ? fields(p[0]) : null, works: p[1] }; });
+  }
+  var started = null;
+  return {
+    start: function () { if (!started) { started = load(10000); started.catch(function () {}); } return started; },
+    take: function () { var s = started; started = null; return s; },
+    load: load
+  };
+})();
+try { window.__luna3Rest.start(); } catch (e) {}
+setTimeout(function () {
+  try {
+    if (window.__luna3Ready) return;
+    var last = Number(sessionStorage.getItem("luna3-wd") || 0);
+    if (Date.now() - last < 60000) return;
+    sessionStorage.setItem("luna3-wd", String(Date.now()));
+    location.reload();
+  } catch (e) {}
+}, 12000);
+</script>
+<script>
 /* 前回表示したトップ画面を、Firebase読み込みを待たずに即表示（stale-while-revalidate）。
    本体スクリプトが起動すると自動的に最新の描画で置き換わる。 */
 (function () {
@@ -2483,15 +2541,28 @@ main#honbun.is-editing .chapter-edit-body > p.no-indent { text-indent: 0; }
     return !!(rec && rec.v === 1 && rec.data && Array.isArray(rec.data.works) && rec.data.works.length && rec.data.site);
   }
 
-  /* 取得は最大3回まで再試行する（モバイル回線の一時的な失敗で初期画面に落ちないように） */
+  /* 取得は REST（先行取得済みならそれを利用）→ 失敗時は SDK、の順で最大3巡する */
+  function adaptRest(r) {
+    return [
+      { exists: function () { return !!r.meta; }, data: function () { return r.meta || {}; } },
+      { empty: !r.works.length, forEach: function (f) { r.works.forEach(function (w) { f({ id: w.id, data: function () { return w.data; } }); }); } }
+    ];
+  }
   async function fetchRemote() {
     var lastErr;
     for (var i = 0; i < 3; i++) {
+      var R = window.__luna3Rest;
+      if (R) {
+        try {
+          var pre = (i === 0) ? R.take() : null;
+          return adaptRest(await (pre || R.load(8000)));
+        } catch (e) { lastErr = e; }
+      }
       try {
-        return await withTimeout(Promise.all([getDoc(META_REF), getDocs(WORKS_COL)]), 10000, "load");
+        return await withTimeout(Promise.all([getDoc(META_REF), getDocs(WORKS_COL)]), 8000, "load");
       } catch (e) {
         lastErr = e;
-        if (i < 2) await new Promise(function (r) { setTimeout(r, 700 * (i + 1)); });
+        if (i < 2) await new Promise(function (r) { setTimeout(r, 500 * (i + 1)); });
       }
     }
     throw lastErr;
